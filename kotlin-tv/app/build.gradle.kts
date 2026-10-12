@@ -9,7 +9,9 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.hongguotv.nativeapp"
-        minSdk = 26
+        // Lowered from 26 (Android 8.0) to 21 (Android 5.0 Lollipop).
+        // NOTE: Media3 must stay <= 1.8.1 (media3-exoplayer/media3-ui 1.9.0+ require API 23).
+        minSdk = 21
         targetSdk = 36
         versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
         versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"

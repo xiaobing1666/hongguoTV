@@ -52,7 +52,9 @@ class ArtworkLoader(context: Context) {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private val lowRam = context.applicationContext.getSystemService(ActivityManager::class.java)?.isLowRamDevice == true
+    // Context.getSystemService(Class) is API 23; the String overload exists since API 1,
+    // so use it to stay safe on Android 5.0/5.1 (minSdk 21).
+    private val lowRam = (context.applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
     private val cacheBytes = (if (lowRam) 4 else 8) * 1024 * 1024
     private val cache = object : LruCache<Key, Bitmap>(cacheBytes) {
         override fun sizeOf(key: Key, value: Bitmap) = value.allocationByteCount
@@ -65,7 +67,16 @@ class ArtworkLoader(context: Context) {
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val signal = Object()
-    private val pending = PriorityQueue<Job>(compareBy<Job> { it.priority }.thenBy { it.order })
+    // java.util.PriorityQueue only exists on Android API 24+ and is NOT provided by core
+    // library desugaring, so keep a plain list and pick the head manually.
+    // Ordering: lowest priority number first, then earliest insertion order.
+    private val pendingOrder = compareBy<Job> { it.priority }.thenBy { it.order }
+    private val pending = mutableListOf<Job>()
+    private fun pollPending(): Job? {
+        val best = pending.minWithOrNull(pendingOrder) ?: return null
+        pending.remove(best)
+        return best
+    }
     private val jobs = mutableMapOf<Key, Job>()
     private val bindings = WeakHashMap<ImageView, Binding>()
     private var owner = 0L
@@ -206,7 +217,7 @@ class ArtworkLoader(context: Context) {
             val job = try {
                 synchronized(signal) {
                     while (pending.isEmpty() && !closed) signal.wait()
-                    if (closed) null else pending.poll()
+                    if (closed) null else pollPending()
                 }
             } catch (_: InterruptedException) { return } ?: return
             val bitmap = try {

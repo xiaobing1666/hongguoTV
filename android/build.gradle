@@ -1,7 +1,9 @@
 buildscript {
     ext {
         buildToolsVersion = "36.0.0"
-        minSdkVersion = 26
+        // RN 0.81 requires minSdk >= 24 (Android 7.0); the framework AARs declare minSdk 24.
+        // API 21 would require downgrading React Native to <= 0.71 (a breaking change).
+        minSdkVersion = 24
         compileSdkVersion = 36
         targetSdkVersion = 36
         ndkVersion = "27.1.12297006"

@@ -3,10 +3,12 @@ package com.hongguotv.nativeapp
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -20,6 +22,7 @@ import com.hongguotv.core.PhoneSearchServer
 import com.hongguotv.core.LibraryTransferServer
 import com.hongguotv.core.BackupData
 import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.concurrent.Executors
 
 /** Native modal controls kept separate from catalog/player navigation. */
@@ -100,12 +103,25 @@ class TvTools(private val activity: Activity) {
         setImageBitmap(Bitmap.createBitmap(pixels,360,360,Bitmap.Config.ARGB_8888))
         contentDescription="二维码"
     }
+    /** The TV's LAN IPv4 address, or null when it is not on Wi-Fi/Ethernet.
+     *  getSystemService(Class), getActiveNetwork() and getNetworkCapabilities() are all API 23+,
+     *  so on Android 5.0/5.1 we fall back to enumerating the network interfaces instead. */
+    private fun lanAddress(): String? {
+        val connectivity=activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network=connectivity.activeNetwork ?: return null
+            val capabilities=connectivity.getNetworkCapabilities(network)
+            val local=capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true || capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)==true
+            if (!local) return null
+            return connectivity.getLinkProperties(network)?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address && it.isSiteLocalAddress }?.hostAddress
+        }
+        return NetworkInterface.getNetworkInterfaces()?.toList()
+            ?.flatMap { it.inetAddresses?.toList() ?: emptyList() }
+            ?.firstOrNull { it is Inet4Address && it.isSiteLocalAddress }?.hostAddress
+    }
     fun phoneInput(anchor: View?,submit: (String)->Unit) {
-        val connectivity=activity.getSystemService(ConnectivityManager::class.java)
-        val network=connectivity.activeNetwork
-        val capabilities=connectivity.getNetworkCapabilities(network)
-        val address=connectivity.getLinkProperties(network)?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address && it.isSiteLocalAddress }?.hostAddress
-        if(address==null || capabilities==null || !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) {
+        val address=lanAddress()
+        if(address==null) {
             info("手机输入","请让电视和手机连接同一局域网（Wi-Fi 或有线网络）后重试。",anchor); return
         }
         val content=column(); val status=label("正在生成二维码…"); content.addView(status)
@@ -128,10 +144,8 @@ class TvTools(private val activity: Activity) {
         }
     }
     fun libraryTransfer(backup: String,anchor: View?,restore: (BackupData,Boolean)->Unit) {
-        val connectivity=activity.getSystemService(ConnectivityManager::class.java)
-        val network=connectivity.activeNetwork; val capabilities=connectivity.getNetworkCapabilities(network)
-        val address=connectivity.getLinkProperties(network)?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address && it.isSiteLocalAddress }?.hostAddress
-        if(address==null || capabilities==null || !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) {
+        val address=lanAddress()
+        if(address==null) {
             info("备份与恢复","请让电视和手机连接同一局域网后重试。",anchor); return
         }
         val content=column(); val status=label("正在生成二维码…"); content.addView(status)

@@ -67,7 +67,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
         if (permissionRequested) {
             permissionRequested = false
-            if (activity.packageManager.canRequestPackageInstalls()) install()
+            if (canInstallPackages()) install()
             else { status = "安装权限未开启，可在这里再次安装"; show(anchor) }
         }
     }
@@ -83,6 +83,13 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         // TLS socket close may send close_notify; it must not run on Android's main thread.
         Thread({ repository.close() }, "hongguotv-update-cleanup").start()
     }
+    /** True when this app may install APKs. The per-app install-permission API
+     *  (PackageManager.canRequestPackageInstalls / Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+     *  only exists on API 26+. On Android 5.0–7.0 the legacy global "Unknown sources"
+     *  setting governs sideloading, so we treat installs as allowed and let the system
+     *  package installer surface any block. */
+    private fun canInstallPackages(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O || activity.packageManager.canRequestPackageInstalls()
     private fun updateStatus(text: String) { status = text; statusView?.text = text }
     private fun deferred(update: AppUpdate) = preferences.getLong("deferred_code", 0) == update.versionCode && preferences.getLong("deferred_until", 0) > System.currentTimeMillis()
     private fun renderActions() {
@@ -180,7 +187,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         fun signers(info: android.content.pm.PackageInfo) =
             (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
         if (candidate.packageName != activity.packageName || version != update.versionCode || candidate.versionName != update.versionName || version <= BuildConfig.VERSION_CODE ||
-            candidate.applicationInfo?.minSdkVersion != update.minSdk || signers(installed).isEmpty() || signers(installed) != signers(candidate))
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && candidate.applicationInfo?.minSdkVersion != update.minSdk) || signers(installed).isEmpty() || signers(installed) != signers(candidate))
             throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {
@@ -188,7 +195,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         if (busy || !active || !ready) return
         work({ validateApk(update) }) {
             try {
-                if (!activity.packageManager.canRequestPackageInstalls()) {
+                if (!canInstallPackages()) {
                     permissionRequested = true
                     activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}")))
                 } else {

@@ -67,26 +67,41 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
-        if(type==ContentType.COMIC) return appSearch(keyword,page,type)
-        try { val result=appSearch(keyword,page,type); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback for short dramas only. */ }
-        val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
-        val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
-        val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-        val items=valid(rows.objects().map(::card))
-        return CatalogPage(items,items.isNotEmpty() && page<100)
+        // Try the in-app (fqnovel) search first for every content type. If it fails or
+        // returns an empty page (the fqnovel search endpoint has been returning empty
+        // bodies), fall back to the website search so search never hard-fails.
+        try { val result=appSearch(keyword,page,type); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e }
+        // Website fallback. The site intermittently answers 5xx under load / rapid requests,
+        // so retry a few times before giving up.
+        var lastFailure: Exception? = null
+        for (attempt in 0 until 3) {
+            try {
+                val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
+                val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
+                val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+                val items=valid(rows.objects().map(::card))
+                return CatalogPage(items,items.isNotEmpty() && page<100)
+            } catch (e: IOException) {
+                if(e is SearchSessionExpiredException) throw e
+                lastFailure=e
+                if(attempt<2) runCatching { Thread.sleep(500) }
+            }
+        }
+        throw lastFailure ?: IOException("搜索数据暂不可用")
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
         val values=VendorConstants.device.toMutableMap()
         for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
         values["version_name"]="7.2.2.32"
-        values.putAll(linkedMapOf("query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),"bookshelf_search_plan" to "4","use_correct" to "true","user_is_login" to "0"))
+        // The fqnovel search API now keys off the comprehensive "feed" tab (tab_name) instead of a
+        // numeric tab_type; the old tab_type-based request is answered with an empty body.
+        values.putAll(linkedMapOf("query" to keyword,"tab_name" to "feed","search_source" to "1","count" to "0","offset" to ((page-1)*20).toString(),"use_correct" to "true"))
         val cursor=synchronized(searchCursors) {
             val now=clock()
             searchCursors.entries.removeAll { now-it.value.updatedAt>300000 || (page==1 && it.key.first==type && it.key.second==keyword) }
             searchCursors[Triple(type,keyword,page-1)]
         }
-        if(type==ContentType.COMIC && page>1 && cursor==null) throw SearchSessionExpiredException()
+        if(page>1 && cursor==null) throw SearchSessionExpiredException()
         cursor?.let {
             if(it.searchId.isNotBlank()) values["search_id"]=it.searchId
             if(it.passback.isNotBlank()) values["passback"]=it.passback
@@ -96,18 +111,24 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val data=JSONObject(text(signed.url,signed))
         if(data.optInt("code",-1)!=0) throw IOException("搜索接口暂不可用")
         val tabs=data.optJSONArray("search_tabs") ?: data.optJSONObject("data")?.optJSONArray("search_tabs") ?: throw IOException("搜索格式异常")
-        val tab=tabs.objects().firstOrNull { it.optInt("tab_type")==type.searchTab } ?: throw IOException("${type.label}搜索暂不可用")
+        val tab=tabs.objects().firstOrNull() ?: throw IOException("搜索暂不可用")
         val list=mutableListOf<Series>()
         for(cell in (tab.optJSONArray("data") ?: JSONArray()).objects()) {
-            val cells=mutableListOf(cell)
-            runCatching { JSONObject(cell.str("lynx_data")).optJSONArray("cell_data")?.objects() }.getOrNull()?.let { cells.addAll(it) }
-            for(row in cells) {
-                val video=row.optJSONArray("video_data")?.objects()?.firstOrNull() ?: continue
-                val id=video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
-                val title=row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty().ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
-                val count=video.optInt("episode_cnt")
-                list+=Series(id,title,cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"))
-            }
+            val video=when(val raw=cell.opt("video_data")) {
+                is JSONArray -> raw.objects().firstOrNull()
+                is JSONObject -> raw
+                else -> null
+            } ?: JSONObject()
+            val detail=cell.optJSONObject("video_detail") ?: JSONObject()
+            val inner=video.optJSONObject("video_detail") ?: JSONObject()
+            val id=cell.str("book_id").ifEmpty { cell.str("search_result_id").ifEmpty { video.str("series_id") } }
+            val title=cell.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty()
+                .ifEmpty { detail.str("series_title") }.ifEmpty { video.str("title") }.ifEmpty { inner.str("series_title") }
+            val count=detail.optInt("episode_cnt").takeIf { it>0 } ?: video.optInt("episode_cnt").takeIf { it>0 } ?: inner.optInt("episode_cnt")
+            val cover=video.str("cover").ifEmpty { inner.str("series_cover") }
+            val intro=inner.str("series_intro").ifEmpty { detail.str("series_intro") }
+            val badge=if(count>0) "全 $count 集" else video.str("rec_text")
+            list+=Series(id,title,cleanUrl(cover),intro,badge,video.str("sub_title"))
         }
         synchronized(searchCursors) {
             searchCursors[Triple(type,keyword,page)]=SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock())

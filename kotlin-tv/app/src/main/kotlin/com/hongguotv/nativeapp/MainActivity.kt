@@ -15,6 +15,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.widget.*
 import android.text.TextUtils
 import androidx.media3.common.*
@@ -195,8 +196,13 @@ class MainActivity: Activity() {
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
-        connectivity=getSystemService(ConnectivityManager::class.java)
-        runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
+        // getSystemService(Class) is API 23; use the String overload (API 1) for Android 5.x.
+        connectivity=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        // registerDefaultNetworkCallback is API 24; on Android 5.x/6.x we simply skip network
+        // callbacks and rely on the polling checks in networkAvailable().
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
+        }
         favoriteMonitor=FavoriteMonitor(library,repository) { refreshFavoriteLabels() }
         mediaSession=TvMediaSession(this,{ if(foreground && screen=="player") requestPlayback(true) },{ if(foreground && screen=="player") requestPlayback(false) },{ position -> if(foreground && screen=="player") seekTo(position) },{ direction -> skipEpisode(direction) },{ if(foreground && screen=="player") returnToDetail() })
         message(base(),"正在读取本机记录…")
@@ -261,6 +267,7 @@ class MainActivity: Activity() {
                     else { deferredWork?.discard?.invoke(); deferredWork=DeferredUi({ done(result) },discard) }
                 }
             } catch(e: Exception) {
+                android.util.Log.e("HongguoTV","background work failed",e)
                 main.post {
                     if(!isDestroyed && generation==ticket) {
                         if(foreground) failed(e) else deferredWork=DeferredUi({ failed(e) })
@@ -931,7 +938,14 @@ class MainActivity: Activity() {
             } catch(_: Exception) { remote?.close() }
         }
     }
-    private fun networkAvailable(): Boolean = connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)==true
+    // ConnectivityManager.getActiveNetwork() is API 23. On Android 5.x fall back to the deprecated
+    // activeNetworkInfo, which still reports whether a usable connection exists.
+    @Suppress("DEPRECATION")
+    private fun networkAvailable(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)==true
+        else
+            connectivity.activeNetworkInfo?.isConnected == true
     private fun currentPosition(): Long = pendingSeek ?: player?.currentPosition?.takeIf { playbackReady } ?: startPosition
     private fun cancelRecovery() { main.removeCallbacks(retryRunnable); retryPending=false; autoRecovery=false }
     private fun scheduleRecovery() {
